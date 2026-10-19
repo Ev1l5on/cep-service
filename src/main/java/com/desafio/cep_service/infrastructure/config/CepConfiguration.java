@@ -2,6 +2,9 @@ package com.desafio.cep_service.infrastructure.config;
 
 import com.desafio.cep_service.application.port.out.ConsultaCepPort;
 import com.desafio.cep_service.application.port.out.EnderecoRepositoryPort;
+import com.desafio.cep_service.application.port.out.PublicarConsultaPort;
+import com.desafio.cep_service.application.port.out.ConsultaLogRepositoryPort;
+import com.desafio.cep_service.application.usecase.RegistrarConsultaService;
 import com.desafio.cep_service.application.usecase.CepService;
 import com.desafio.cep_service.application.usecase.CadastrarEnderecoService;
 import org.springframework.beans.factory.annotation.Value;
@@ -24,8 +27,14 @@ public class CepConfiguration {
     }
 
     @Bean
-    CepService cepService(ConsultaCepPort consultaCepPort, EnderecoRepositoryPort enderecoRepository) {
-        return new CepService(consultaCepPort, enderecoRepository);
+    CepService cepService(ConsultaCepPort consultaCepPort, EnderecoRepositoryPort enderecoRepository,
+                          PublicarConsultaPort publicador) {
+        return new CepService(consultaCepPort, enderecoRepository, publicador);
+    }
+
+    @Bean
+    RegistrarConsultaService registrarConsultaService(ConsultaLogRepositoryPort repository) {
+        return new RegistrarConsultaService(repository);
     }
 
     @Bean

@@ -5,6 +5,7 @@ import com.desafio.cep_service.application.exception.FalhaPersistenciaEnderecoEx
 import com.desafio.cep_service.application.port.out.ConsultaCepPort;
 import com.desafio.cep_service.application.port.out.EnderecoRepositoryPort;
 import com.desafio.cep_service.application.usecase.CepService;
+import com.desafio.cep_service.application.port.out.PublicarConsultaPort;
 import com.desafio.cep_service.application.usecase.CadastrarEnderecoService;
 import com.desafio.cep_service.domain.model.Endereco;
 import com.desafio.cep_service.infrastructure.adapter.in.rest.ApiExceptionHandler;
@@ -38,7 +39,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 import tools.jackson.databind.json.JsonMapper;
 
-@SpringBootTest
+@SpringBootTest(properties = {"spring.kafka.listener.auto-startup=false", "spring.kafka.admin.auto-create=false"})
 class EnderecoPersistenceIntegrationTest {
     // Schema novo por execução: nenhum registro/tabela preexistente é apagado pelos testes.
     private static final String SCHEMA = "cep_it_" + UUID.randomUUID().toString().replace("-", "");
@@ -59,7 +60,7 @@ class EnderecoPersistenceIntegrationTest {
 
     @Test
     void migracaoReproduzivelAplicadaAntesDaValidacaoJpa() {
-        assertEquals("1", flyway.info().current().getVersion().getVersion());
+        assertEquals("2", flyway.info().current().getVersion().getVersion());
         flyway.validate();
         assertEquals(0, flyway.migrate().migrationsExecuted);
         assertEquals(SCHEMA, jdbc.queryForObject("SELECT current_schema()", String.class));
@@ -87,7 +88,7 @@ class EnderecoPersistenceIntegrationTest {
             assertFalse(TransactionSynchronizationManager.isActualTransactionActive());
             return Optional.of(endereco(cep));
         });
-        CepService service = new CepService(externo, adapter);
+        CepService service = new CepService(externo, adapter, mock(PublicarConsultaPort.class));
         var mvc = MockMvcBuilders.standaloneSetup(new CepController(service))
                 .setControllerAdvice(new ApiExceptionHandler()).build();
         for (int i = 0; i < 2; i++) {
@@ -125,7 +126,7 @@ class EnderecoPersistenceIntegrationTest {
             return Optional.of(new Endereco(base.cep(), "Rua concorrente " + number,
                     base.complemento(), base.bairro(), base.localidade(), base.uf()));
         });
-        CepService service = new CepService(externo, persistence);
+        CepService service = new CepService(externo, persistence, mock(PublicarConsultaPort.class));
         try (var executor = Executors.newFixedThreadPool(2)) {
             var first = executor.submit(() -> service.buscar(cep));
             var second = executor.submit(() -> service.buscar(cep));
@@ -235,7 +236,7 @@ class EnderecoPersistenceIntegrationTest {
         });
         var executor = Executors.newSingleThreadExecutor();
         try {
-            var consulta = executor.submit(() -> new CepService(externo, adapter).buscar(cep));
+            var consulta = executor.submit(() -> new CepService(externo, adapter, mock(PublicarConsultaPort.class)).buscar(cep));
             assertTrue(iniciouHttp.await(10, TimeUnit.SECONDS));
             Endereco manual = cadastro.cadastrar(new Endereco(cep, "Rua manual prioritária",
                     "Manual", "Centro", "São Paulo", "SP"));
@@ -263,7 +264,7 @@ class EnderecoPersistenceIntegrationTest {
 
     private MockMvc mvcCadastro(ConsultaCepPort externo) {
         return MockMvcBuilders.standaloneSetup(new EnderecoController(cadastro),
-                        new CepController(new CepService(externo, adapter)))
+                        new CepController(new CepService(externo, adapter, mock(PublicarConsultaPort.class))))
                 .setControllerAdvice(new ApiExceptionHandler()).build();
     }
 

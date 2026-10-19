@@ -1,5 +1,9 @@
 # CEP Service
 
+As etapas 05 e 06 incluem auditoria assincrona via Kafka e PostgreSQL.
+Contrato do evento, retry, DLT, limites de confiabilidade e instrucoes de
+operacao: [docs/auditoria-kafka.md](docs/auditoria-kafka.md).
+
 ## Organizacao da consulta de CEP
 
 O pacote base permanece `com.desafio.cep_service`:
@@ -120,7 +124,7 @@ Requisitos: Java 21 e Docker Desktop com Docker Compose. A imagem oficial
 3. Inicie o banco:
 
 ```sh
-docker compose up -d --wait postgres
+docker compose up -d --wait postgres kafka
 docker compose ps
 ```
 
@@ -277,5 +281,6 @@ com resposta identica mesmo com o cliente externo apontado temporariamente para
 uma porta inacessivel. O registro foi preservado. A URL configurada no arquivo
 continua sendo a URL publica original.
 
-Kafka, logs assincronos e suas migracoes continuam pendentes. Enderecos locais
-nao possuem politica de expiracao/atualizacao automatica nesta etapa.
+A auditoria Kafka e a migracao V2 estao implementadas; a suite completa exige
+PostgreSQL e Kafka locais saudaveis. Enderecos locais nao possuem politica de
+expiracao/atualizacao automatica nesta etapa.

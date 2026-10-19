@@ -4,6 +4,7 @@ import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
 import com.desafio.cep_service.application.usecase.CepService;
+import com.desafio.cep_service.application.port.out.PublicarConsultaPort;
 import com.desafio.cep_service.application.port.out.EnderecoRepositoryPort;
 import com.desafio.cep_service.application.exception.FalhaPersistenciaEnderecoException;
 import com.desafio.cep_service.domain.model.Endereco;
@@ -49,7 +50,7 @@ class CepControllerTest {
         server = MockRestServiceServer.bindTo(builder).build();
         repository = mock(EnderecoRepositoryPort.class);
         when(repository.salvar(any())).thenAnswer(invocation -> invocation.getArgument(0));
-        CepService service = new CepService(new ViaCepClient(builder.build()), repository);
+        CepService service = new CepService(new ViaCepClient(builder.build()), repository, mock(PublicarConsultaPort.class));
         mvc = MockMvcBuilders.standaloneSetup(new CepController(service))
                 .setControllerAdvice(new ApiExceptionHandler()).build();
     }

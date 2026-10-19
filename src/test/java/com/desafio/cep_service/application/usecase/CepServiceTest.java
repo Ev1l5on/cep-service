@@ -1,6 +1,7 @@
 package com.desafio.cep_service.application.usecase;
 
 import com.desafio.cep_service.application.port.out.ConsultaCepPort;
+import com.desafio.cep_service.application.port.out.PublicarConsultaPort;
 import com.desafio.cep_service.application.port.out.EnderecoRepositoryPort;
 import com.desafio.cep_service.application.exception.EnderecoJaCadastradoException;
 import com.desafio.cep_service.application.exception.FalhaPersistenciaEnderecoException;
@@ -18,7 +19,7 @@ import static org.mockito.Mockito.*;
 class CepServiceTest {
     private final ConsultaCepPort port = mock(ConsultaCepPort.class);
     private final EnderecoRepositoryPort repository = mock(EnderecoRepositoryPort.class);
-    private final CepService service = new CepService(port, repository);
+    private final CepService service = new CepService(port, repository, mock(PublicarConsultaPort.class));
 
     @BeforeEach
     void setup() {
