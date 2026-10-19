@@ -1,0 +1,15 @@
+# Somente os arquivos necessarios ao build entram no contexto.
+# .env, Git, IDE, credenciais locais e target ficam excluidos por padrao.
+**
+!Dockerfile
+!.dockerignore
+!pom.xml
+!mvnw
+!.mvn/
+!.mvn/**
+!src/
+!src/**
+**/.DS_Store
+**/*.pem
+**/*.key
+**/.env*

@@ -58,13 +58,13 @@ O cluster ID deve permanecer estavel para reutilizar esse volume.
 | Uso | Bootstrap |
 | --- | --- |
 | Aplicacao no Mac/IntelliJ | `localhost:9092` |
-| Aplicacao em futuro container na rede Compose | `kafka:29092` |
+| Aplicacao no servico app da rede Compose | `kafka:29092` |
 
 O listener EXTERNAL e publicado somente em 127.0.0.1. `KAFKA_PORT` e
 `KAFKA_ADVERTISED_HOST` controlam a porta/endereco anunciados ao host. Se alterar
 a porta, atualize tambem KAFKA_BOOTSTRAP_SERVERS no processo Java. O listener
 INTERNAL continua usando kafka:29092. Para a etapa 07, injete tambem
-POSTGRES_HOST=postgres e POSTGRES_PORT=5432 no futuro container da aplicacao.
+POSTGRES_HOST=postgres e POSTGRES_PORT=5432 no servico app do Compose (configurados automaticamente).
 
 | Variavel | Padrao |
 | --- | --- |

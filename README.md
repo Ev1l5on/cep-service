@@ -1,8 +1,159 @@
 # CEP Service
 
-As etapas 05 e 06 incluem auditoria assincrona via Kafka e PostgreSQL.
+A etapa 07 adiciona a aplicacao ao Docker Compose. As etapas 05 e 06 incluem
+auditoria assincrona via Kafka e PostgreSQL.
 Contrato do evento, retry, DLT, limites de confiabilidade e instrucoes de
 operacao: [docs/auditoria-kafka.md](docs/auditoria-kafka.md).
+
+## Iniciar o sistema completo com Docker
+
+Pre-requisitos: Docker Engine/Desktop em execucao, Docker Compose v2 ou superior,
+portas locais 8080, 5432 e 9092 livres e acesso a internet para baixar imagens,
+dependencias Maven e consultar ViaCEP. Nao e necessario instalar Java ou Maven
+no host para executar o sistema completo. As imagens Temurin Java 21, PostgreSQL
+17 e Kafka 4.1.1 suportam ARM64 (Apple Silicon) e AMD64; nao se forca emulacao.
+
+1. Se ainda nao existir, copie `.env.example` para `.env`.
+2. Preencha `POSTGRES_PASSWORD` somente no `.env`, com uma senha gerada localmente
+   (por exemplo, `openssl rand -hex 24`). Nunca versione esse arquivo. Em um volume
+   existente, preserve as credenciais ja utilizadas; editar `.env` nao troca a senha
+   armazenada pelo PostgreSQL.
+3. Inicie todos os servicos:
+
+```sh
+docker compose up -d --build
+```
+
+O primeiro build baixa as dependencias. Para aguardar tambem os healthchecks:
+
+```sh
+docker compose up -d --build --wait --wait-timeout 240
+docker compose ps
+curl --fail http://localhost:8080/actuator/health
+```
+
+O esperado e `app`, `postgres` e `kafka` saudaveis e `status: UP` no Actuator.
+O app aguarda os healthchecks das dependencias. Flyway aplica/valida V1 e V2 e
+o KafkaAdmin cria automaticamente os topicos de consulta e DLT; nao e necessario
+criar tabelas ou topicos manualmente. O healthcheck do app verifica o Actuator e
+a conexao de banco; nao substitui a verificacao do fluxo Kafka ate o PostgreSQL.
+
+| Configuracao | IntelliJ / JVM no Mac | App no Docker Compose |
+| --- | --- | --- |
+| PostgreSQL | `localhost:${POSTGRES_PORT:-5432}` | `postgres:5432` |
+| Kafka | `localhost:${KAFKA_PORT:-9092}` | `kafka:29092` |
+| HTTP | `localhost:8080` | `localhost:${APP_PORT:-8080}` |
+| Variaveis | exportar ou configurar na IDE | `environment` do servico `app` |
+
+Os valores da coluna local representam variaveis shell, com seus valores padrao.
+O Compose usa `.env` para interpolacao e injeta as variaveis declaradas no app.
+Hosts/portas internos permanecem fixos, mesmo ao alterar portas publicadas no Mac.
+A API e as portas PostgreSQL/Kafka sao publicadas somente em `127.0.0.1`.
+Para mudar a porta HTTP publicada, configure `APP_PORT` no `.env`; dentro do
+container, a aplicacao continua usando 8080. Nao execute a JVM local e o app
+Docker simultaneamente na mesma porta; use `docker compose stop app` antes da IDE.
+
+### Consultar e cadastrar enderecos
+
+```sh
+curl --fail http://localhost:8080/api/ceps/01001000
+
+curl -i -X POST http://localhost:8080/api/enderecos \
+  -H 'Content-Type: application/json' \
+  -d '{"cep":"12345678","logradouro":"Rua manual","complemento":"Casa 1","bairro":"Centro","localidade":"São Paulo","uf":"SP"}'
+
+curl --fail http://localhost:8080/api/ceps/12345678
+```
+
+O primeiro cadastro retorna 201 e repetir o mesmo CEP retorna 409. O GET retorna
+200 com os sete campos originais, priorizando o cadastro local. Um CEP ausente
+no banco e consultado no ViaCEP e persistido antes da resposta. A publicacao do
+evento acontece em executor separado, sem aguardar Kafka ou gravacao da auditoria.
+POST nao publica eventos de consulta.
+
+### Verificar auditoria e migracoes
+
+Cada GET bem-sucedido gera um novo `eventId`. A auditoria e eventual: aguarde o
+consumer antes de consultar o registro. Os comandos abaixo usam as credenciais
+ja presentes no container, sem imprimi-las:
+
+```sh
+docker compose exec -T postgres sh -c 'exec psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"' <<'SQL'
+SELECT version, description, success FROM flyway_schema_history ORDER BY installed_rank;
+SELECT cep, logradouro, localidade, uf FROM enderecos ORDER BY id DESC LIMIT 10;
+SELECT event_id, cep, consulted_at, source, response_data
+FROM consulta_logs ORDER BY id DESC LIMIT 10;
+SELECT event_id, count(*) FROM consulta_logs GROUP BY event_id HAVING count(*) > 1;
+SQL
+
+docker compose exec kafka /opt/kafka/bin/kafka-topics.sh \
+  --bootstrap-server kafka:29092 --list
+docker compose exec kafka /opt/kafka/bin/kafka-consumer-groups.sh \
+  --bootstrap-server kafka:29092 --describe --group cep-service-auditoria-v1
+docker compose logs --tail=100 app
+```
+
+Topicos padrao: `cep-consultas-v1` e `cep-consultas-v1.DLT`. Consulta e DLT tem
+3 particoes; nomes/grupo podem ser sobrescritos por variaveis de ambiente.
+Particoes vazias podem mostrar offset/lag `-`. Reentregar o mesmo `eventId` nao
+cria outro log, devido a constraint UNIQUE e ao INSERT idempotente do consumidor.
+Um novo GET tem novo `eventId` e, portanto, cria outro log normalmente.
+Falhas do producer nao alteram o sucesso HTTP; envio direto em memoria pode
+perder eventos em falhas do processo, indisponibilidade prolongada ou fila cheia.
+Retry, DLT e limites estao descritos em [auditoria Kafka](docs/auditoria-kafka.md).
+
+### Build, recursos e operacao
+
+O `Dockerfile` usa Maven Wrapper/JDK 21 no build e apenas o JAR executavel com
+JRE 21 no runtime. Dependencias Maven usam cache BuildKit. O contexto e limitado
+por `.dockerignore`, excluindo `.env`, credenciais, Git, IDE e artefatos locais.
+O processo Java executa como UID/GID 10001, sem root; curl verifica o Actuator.
+Nao ha fontes nem credenciais embutidas na imagem final.
+
+O build da imagem executa `package -DskipTests`, compilando os testes sem
+executa-los, porque os testes de integracao dependem de PostgreSQL/Kafka reais
+fora do ambiente isolado de build. Isso nao muda o POM nem desativa a suite:
+execute obrigatoriamente a validacao completa separada, conforme abaixo.
+
+O app tem limite local de 768 MiB, 1 CPU e heap de ate 70% da memoria disponivel.
+Esses limites podem ser ajustados no Compose se o ambiente exigir. Os logs vao
+para stdout/stderr. `restart: unless-stopped` reinicia o app se o processo falhar
+ou o Docker reiniciar; um `stop` explicito e respeitado. A parada permite ate 60s
+para encerrar HTTP, executor e consumer. `depends_on` ordena a inicializacao,
+mas nao recupera automaticamente dependencias que falhem depois: PostgreSQL e
+Kafka preservam sua configuracao existente e podem exigir reinicio manual.
+
+```sh
+# Parar todos os servicos, preservando containers e volumes.
+docker compose stop
+# Retomar e aguardar a saude das dependencias e do app.
+docker compose up -d --wait
+# Reiniciar apenas a aplicacao.
+docker compose restart app
+```
+
+Os volumes `postgres_data` e `kafka_data` permanecem intactos. Preserve o nome
+do projeto Compose para reutiliza-los. Nunca utilize `docker compose down -v`.
+As imagens e o broker unico sao adequados ao desafio local; nao representam
+alta disponibilidade ou configuracao de seguranca para producao.
+
+### Executar a suite completa
+
+Requer Java 21 no host. Inicie as dependencias e disponibilize `.env` ao processo
+Maven (somente atribuicoes shell confiaveis, sem imprimir credenciais):
+
+```sh
+docker compose up -d --wait postgres kafka
+set -a
+. ./.env
+set +a
+./mvnw clean test
+git diff --check
+```
+
+Os 207 testes existentes incluem PostgreSQL/Kafka reais em schemas/topicos
+isolados e nao dependem do ViaCEP publico. Os schemas/topicos de teste permanecem
+no ambiente; use infraestrutura dedicada em execucoes recorrentes.
 
 ## Organizacao da consulta de CEP
 
@@ -121,7 +272,7 @@ Requisitos: Java 21 e Docker Desktop com Docker Compose. A imagem oficial
 1. Copie `.env.example` para `.env`, se ainda nao existir.
 2. Gere uma senha com `openssl rand -hex 24` e preencha `POSTGRES_PASSWORD`
    somente no `.env`. Esse arquivo e ignorado pelo Git.
-3. Inicie o banco:
+3. Inicie as dependencias:
 
 ```sh
 docker compose up -d --wait postgres kafka
@@ -154,7 +305,9 @@ Para executar diretamente pela IDE:
 3. Mantenha essa configuracao local: nao compartilhe nem versione uma Run
    Configuration contendo credenciais. Configure tambem as variaveis na execucao
    dos testes/Maven pela IDE; elas nao sao herdadas de outra Run Configuration.
-4. Confirme que `docker compose ps` mostra o PostgreSQL como `healthy` e execute
+4. Configure tambem `KAFKA_BOOTSTRAP_SERVERS=localhost:9092` (ou a porta publicada
+   escolhida), pare o app Docker com `docker compose stop app` e confirme que
+   PostgreSQL e Kafka estao `healthy` em `docker compose ps`. Execute
    a aplicacao. Verifique a conexao Hikari/JPA nos logs e consulte
    `http://localhost:8080/actuator/health`, que deve retornar `status: UP`.
 
@@ -175,25 +328,12 @@ A porta e publicada somente em `127.0.0.1`. Se 5432 estiver ocupada, altere
 
 ### Aplicacao dentro do Docker
 
-A configuracao JDBC existente tambem aceita `POSTGRES_HOST=postgres`.
-Quando a aplicacao estiver em um container na mesma rede Compose do banco,
-injete no container da aplicacao:
-
-```text
-POSTGRES_HOST=postgres
-POSTGRES_PORT=5432
-POSTGRES_DB=<mesmo banco do PostgreSQL>
-POSTGRES_USER=<mesmo usuario do PostgreSQL>
-POSTGRES_PASSWORD=<mesma senha, fornecida pelo ambiente>
-```
-
-Nesse contexto, `postgres` e o nome do servico e `5432` e a porta interna,
-independentemente da porta publicada no Mac. `localhost` dentro de um container
-aponta para o proprio container. Interpolar `.env` no Compose nao injeta todas as
-suas variaveis automaticamente: o futuro servico da aplicacao deve declarar seu
-`environment` explicitamente e aguardar o banco saudavel com
-`depends_on: postgres: condition: service_healthy` na estrutura YAML apropriada.
-O Compose atual inclui somente o banco; a imagem da aplicacao nao faz parte desta etapa.
+O servico `app` ja declara `POSTGRES_HOST=postgres`, `POSTGRES_PORT=5432` e
+`KAFKA_BOOTSTRAP_SERVERS=kafka:29092`, alem de receber banco/usuario/senha do
+mesmo ambiente do PostgreSQL. Ele aguarda as duas dependencias saudaveis.
+`localhost` dentro de um container aponta para o proprio container, por isso
+as conexoes internas utilizam os nomes dos servicos. Consulte o inicio deste
+README para subir o sistema completo com `docker compose up -d --build`.
 
 Os dados ficam no volume nomeado `postgres_data`, gerenciado pelo Compose.
 Para parar sem remover dados, use `docker compose stop postgres`.

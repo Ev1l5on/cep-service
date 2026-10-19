@@ -1,4 +1,43 @@
 services:
+  app:
+    image: cep-service:local
+    build:
+      context: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-cep_service}
+      POSTGRES_USER: ${POSTGRES_USER:-cep_service}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Defina POSTGRES_PASSWORD no arquivo .env}
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      KAFKA_AUDIT_GROUP_ID: ${KAFKA_AUDIT_GROUP_ID:-cep-service-auditoria-v1}
+      KAFKA_AUDIT_TOPIC: ${KAFKA_AUDIT_TOPIC:-cep-consultas-v1}
+      KAFKA_AUDIT_DLT_TOPIC: ${KAFKA_AUDIT_DLT_TOPIC:-cep-consultas-v1.DLT}
+      KAFKA_AUDIT_QUEUE_CAPACITY: ${KAFKA_AUDIT_QUEUE_CAPACITY:-1000}
+      KAFKA_AUDIT_MAX_RETRIES: ${KAFKA_AUDIT_MAX_RETRIES:-2}
+      KAFKA_AUDIT_RETRY_INTERVAL_MS: ${KAFKA_AUDIT_RETRY_INTERVAL_MS:-1000}
+      VIACEP_BASE_URL: ${VIACEP_BASE_URL:-https://viacep.com.br/ws}
+      VIACEP_CONNECT_TIMEOUT_MS: ${VIACEP_CONNECT_TIMEOUT_MS:-2000}
+      VIACEP_READ_TIMEOUT_MS: ${VIACEP_READ_TIMEOUT_MS:-5000}
+      JAVA_TOOL_OPTIONS: -XX:MaxRAMPercentage=70.0
+    ports:
+      - "127.0.0.1:${APP_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "--max-time", "3", "http://localhost:8080/actuator/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+    restart: unless-stopped
+    stop_grace_period: 60s
+    mem_limit: 768m
+    cpus: 1.0
+
   postgres:
     image: postgres:17-bookworm
     environment:
