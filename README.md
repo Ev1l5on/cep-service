@@ -8,10 +8,13 @@ O pacote base permanece `com.desafio.cep_service`:
   o resultado interno, sem dependencias de Spring, Jackson ou ViaCEP.
 - `domain.exception`: excecoes de CEP invalido e nao encontrado.
 - `application.usecase.CepService`: valida e coordena a consulta pela porta
-  `application.port.out.ConsultaCepPort`, que retorna `Optional<Endereco>`.
+  `application.port.out.EnderecoRepositoryPort` primeiro; somente a ausencia
+  confirmada permite consultar `ConsultaCepPort` e persistir o resultado.
 - `infrastructure.adapter.in.rest`: controller e DTO publico `CepResponse`.
 - `infrastructure.adapter.out.viacep`: cliente HTTP e DTO externo `ViaCepResponse`.
   Somente esse adaptador interpreta o campo externo `erro`.
+- `infrastructure.adapter.out.persistence`: entidade JPA, repositorio Spring Data
+  e adaptador PostgreSQL, separados do modelo de dominio.
 - `infrastructure.config.CepConfiguration`: monta o caso de uso e o cliente HTTP
   com injecao por construtor, mantendo o nucleo independente do Spring.
 
@@ -38,6 +41,8 @@ Detalhes tecnicos, corpo do provedor e stack traces nao sao enviados ao consumid
 | HTTP externo inesperado, inclusive 400/401/404/500/502 | 502 |
 | HTTP externo 429/503 ou falha de transporte sem timeout (conexao recusada, DNS, TLS) | 503 |
 | Timeout de conexao/leitura ou HTTP externo 408/504 | 504 |
+| Indisponibilidade/transitoriedade do PostgreSQL na leitura ou gravacao | 503 |
+| Outras falhas de persistencia ou conflito sem registro recuperavel | 500 |
 | Falha interna inesperada | 500, com mensagem generica |
 
 Somente o indicador `erro` confirmado representa CEP inexistente. O ViaCEP real
@@ -72,6 +77,39 @@ controller, caso de uso, adaptador e advice. Um servidor HTTP local valida o
 timeout efetivo de leitura. Nenhum teste automatizado consulta o ViaCEP publico.
 
 ## PostgreSQL local
+
+O resultado da revisao dos 15 requisitos da etapa 04 esta em
+[docs/auditoria-etapa-04.md](docs/auditoria-etapa-04.md).
+
+### Cadastro manual
+
+`POST /api/enderecos` recebe os seis campos de endereco:
+
+```json
+{
+  "cep": "12345678",
+  "logradouro": "Rua manual",
+  "complemento": "Casa 1",
+  "bairro": "Centro",
+  "localidade": "São Paulo",
+  "uf": "SP"
+}
+```
+
+O CEP deve conter exatamente oito digitos, a localidade deve ser preenchida
+(ate 255 caracteres) e UF deve ser uma sigla brasileira valida em maiusculas.
+Logradouro, complemento e bairro podem ser nulos. Entradas invalidas retornam
+400 antes de acessar o banco. O cadastro manual nao consulta o ViaCEP.
+
+O sucesso retorna 201, os seis campos persistidos (CEP no formato `12345-678`)
+e `Location: /api/ceps/12345678`. O GET mantem seu contrato anterior com sete
+campos, incluindo `erro: null`, e prioriza o registro armazenado manualmente.
+
+CEP ja cadastrado retorna 409 no formato padronizado de erro. O cadastro nao
+sobrescreve registros existentes, independentemente da origem. A constraint
+UNIQUE protege tambem cadastros simultaneos: um retorna 201 e o outro 409.
+Falhas de gravacao preservam os retornos 503/500 seguros da persistencia.
+Nao foi necessario alterar a migracao ou criar novos campos no dominio/banco.
 
 Requisitos: Java 21 e Docker Desktop com Docker Compose. A imagem oficial
 `postgres:17-bookworm` permite execucao nativa em Apple Silicon, sem forcar amd64.
@@ -163,19 +201,81 @@ banco apenas quando o volume esta vazio. Altera-las no `.env` nao altera usuario
 senhas ou bancos de um volume ja inicializado; essas mudancas exigem administracao
 explicita do PostgreSQL, preservando os dados.
 
-O Hibernate esta configurado com `ddl-auto=none`: a aplicacao nao cria nem apaga
-tabelas automaticamente. Esta etapa prepara somente o PostgreSQL; Kafka e a
-persistencia de enderecos/logs ainda nao foram implementados.
+O Hibernate utiliza `ddl-auto=validate` e `open-in-view=false`. O Flyway aplica
+migracoes antes da validacao JPA; `spring.flyway.clean-disabled=true` impede
+limpeza via Flyway. Nao utilize `ddl-auto=update`, `create` ou `create-drop`.
 
 ### Evolucao do esquema
 
-Sem entidades ou esquema de negocio definido, `ddl-auto=none` permite inicializar
-JPA sem criar tabelas. `spring.jpa.open-in-view=false` permanece ativo.
+O starter Flyway do Spring Boot e o modulo PostgreSQL utilizam as versoes
+gerenciadas pelo BOM do Spring Boot 4.1.1 (Flyway 12.4.0).
+`src/main/resources/db/migration/V1__create_enderecos.sql` cria:
 
-Na etapa de persistencia de enderecos, adote Flyway com suporte PostgreSQL e
-migracoes SQL versionadas em `src/main/resources/db/migration`. Na etapa de logs
-Kafka, acrescente migracoes para as tabelas de auditoria. Defina primeiro os
-modelos e o esquema; nenhuma tabela especulativa e necessaria agora.
-Com as migracoes e entidades implementadas, avalie `ddl-auto=validate` para
-conferir a correspondencia entre mapeamento e esquema. Evite `create`,
-`create-drop` e atualizacoes automaticas como estrategia permanente de esquema.
+| Campo | Tipo / restricoes |
+| --- | --- |
+| `id` | BIGINT identity, chave primaria |
+| `cep` | VARCHAR(8), NOT NULL, UNIQUE, CHECK de oito digitos |
+| `logradouro`, `complemento`, `bairro` | TEXT, opcionais |
+| `localidade` | VARCHAR(255), NOT NULL, nao vazia |
+| `uf` | VARCHAR(2), NOT NULL, CHECK de duas letras maiusculas |
+| `created_at`, `updated_at` | TIMESTAMP WITH TIME ZONE, NOT NULL |
+
+A constraint `uk_enderecos_cep` fornece o indice de consulta por CEP; nenhum
+indice adicional redundante e criado. O banco armazena oito digitos sem hifen;
+o adaptador devolve o formato `00000-000`, preservando os sete campos da API.
+Os timestamps sao preenchidos pela persistencia; `updated_at` e atualizado em
+alteracoes gerenciadas pelo Hibernate. Nao ha atualizacao de enderecos nesta etapa.
+Nao foi criado campo `estado`, pois ele nao pertence ao modelo atual.
+
+O Flyway registra a V1 em `flyway_schema_history`. Depois de aplicada, nao edite
+a V1: evolua com novas migracoes versionadas. Nao ha baseline automatico,
+recriacao de tabelas ou remocao de dados. Um esquema preexistente incompatível
+exige reconciliacao explicita, sem ativar baseline para ocultar divergencias.
+
+### Fluxo DB-first, falhas e concorrencia
+
+1. Validar o CEP antes de qualquer I/O.
+2. Consultar PostgreSQL por CEP usando consulta derivada parametrizada.
+3. Retornar o endereco local sem chamada externa quando presente.
+4. Somente na ausencia confirmada, consultar ViaCEP.
+5. Gravar o endereco valido e responder somente depois do commit.
+
+Falha de banco nunca vira `Optional.empty()` e nunca autoriza fallback externo.
+Falha de gravacao tambem nao retorna um endereco que nao foi persistido. O
+adaptador traduz falhas para `FalhaPersistenciaEnderecoException`, distinguindo
+LEITURA/GRAVACAO e indisponibilidade/erro/conflito nao recuperado. O advice
+registra operacao, motivo e classe da causa, sem expor SQL ou detalhes internos
+nas respostas. As politicas ViaCEP 400/404/502/503/504 permanecem preservadas.
+
+O caso de uso nao e transacional. O adaptador utiliza `TransactionTemplate` com
+`REQUIRES_NEW` para cada leitura (read-only) e gravacao (`saveAndFlush`). Nenhuma
+transacao permanece aberta durante o HTTP externo.
+
+Duas consultas concorrentes podem chamar ViaCEP. A constraint UNIQUE arbitra a
+gravacao. Somente SQLSTATE 23505 associado a `uk_enderecos_cep` e traduzido para
+`EnderecoJaCadastradoException`, depois que o rollback ja terminou. O caso de uso
+reconsulta em nova transacao e retorna o registro vencedor. Outras violacoes de
+integridade nao sao tratadas como concorrencia. Se a recuperacao nao encontrar o
+registro, retorna erro controlado; se a releitura falhar, propaga a falha do banco.
+Nao ha lock global nem sincronizacao em memoria na aplicacao.
+
+### Testes de persistencia
+
+Execute `./mvnw clean test` com as variaveis PostgreSQL exportadas, conforme acima.
+Os testes de integracao usam o PostgreSQL Docker existente e criam um schema
+isolado `cep_it_<uuid>` por execucao, sem apagar dados, tabelas ou volumes.
+Esses schemas de teste permanecem no banco, respeitando a politica de nao remocao;
+use um banco dedicado a testes em execucoes recorrentes. A credencial local
+precisa permitir a criacao desse schema. Os testes unitarios usam mocks.
+
+A cobertura inclui migracao reproduzivel, esquema validado, round-trip JPA,
+consulta parametrizada, ausencia de transacao durante ViaCEP e concorrencia real
+com rollback e recuperacao. Nenhum teste automatizado depende do ViaCEP publico.
+
+Na validacao manual desta etapa, `01001000` foi persistido e retornado novamente
+com resposta identica mesmo com o cliente externo apontado temporariamente para
+uma porta inacessivel. O registro foi preservado. A URL configurada no arquivo
+continua sendo a URL publica original.
+
+Kafka, logs assincronos e suas migracoes continuam pendentes. Enderecos locais
+nao possuem politica de expiracao/atualizacao automatica nesta etapa.

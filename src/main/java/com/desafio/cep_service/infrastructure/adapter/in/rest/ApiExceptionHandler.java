@@ -1,6 +1,9 @@
 package com.desafio.cep_service.infrastructure.adapter.in.rest;
 
 import com.desafio.cep_service.application.exception.FalhaConsultaCepException;
+import com.desafio.cep_service.application.exception.EnderecoJaCadastradoException;
+import com.desafio.cep_service.domain.exception.EnderecoInvalidoException;
+import com.desafio.cep_service.application.exception.FalhaPersistenciaEnderecoException;
 import com.desafio.cep_service.domain.exception.CepInvalidoException;
 import com.desafio.cep_service.domain.exception.CepNaoEncontradoException;
 import com.desafio.cep_service.infrastructure.adapter.in.rest.dto.ApiError;
@@ -22,6 +25,16 @@ import java.time.Instant;
 @RestControllerAdvice
 public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
     private static final Logger log = LoggerFactory.getLogger(ApiExceptionHandler.class);
+
+    @ExceptionHandler(EnderecoJaCadastradoException.class)
+    ResponseEntity<Object> enderecoDuplicado(EnderecoJaCadastradoException ex, HttpServletRequest request) {
+        return response(HttpStatus.CONFLICT, ex.getMessage(), request.getRequestURI());
+    }
+
+    @ExceptionHandler(EnderecoInvalidoException.class)
+    ResponseEntity<Object> enderecoInvalido(EnderecoInvalidoException ex, HttpServletRequest request) {
+        return response(HttpStatus.BAD_REQUEST, ex.getMessage(), request.getRequestURI());
+    }
 
     @ExceptionHandler(CepInvalidoException.class)
     ResponseEntity<Object> cepInvalido(CepInvalidoException ex, HttpServletRequest request) {
@@ -51,6 +64,15 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
         log.error("Falha interna: path={} tipo={} causa={}",
                 request.getRequestURI(), ex.getClass().getSimpleName(), causaRaiz(ex));
         return response(HttpStatus.INTERNAL_SERVER_ERROR, "Erro interno do servidor", request.getRequestURI());
+    }
+
+    @ExceptionHandler(FalhaPersistenciaEnderecoException.class)
+    ResponseEntity<Object> falhaPersistencia(FalhaPersistenciaEnderecoException ex, HttpServletRequest request) {
+        HttpStatus status = ex.getMotivo() == FalhaPersistenciaEnderecoException.Motivo.INDISPONIBILIDADE
+                ? HttpStatus.SERVICE_UNAVAILABLE : HttpStatus.INTERNAL_SERVER_ERROR;
+        log.error("Falha de persistência: path={} operacao={} motivo={} causa={}",
+                request.getRequestURI(), ex.getOperacao(), ex.getMotivo(), causaRaiz(ex));
+        return response(status, ex.getMessage(), request.getRequestURI());
     }
 
     @Override

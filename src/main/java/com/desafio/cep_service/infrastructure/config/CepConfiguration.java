@@ -1,7 +1,9 @@
 package com.desafio.cep_service.infrastructure.config;
 
 import com.desafio.cep_service.application.port.out.ConsultaCepPort;
+import com.desafio.cep_service.application.port.out.EnderecoRepositoryPort;
 import com.desafio.cep_service.application.usecase.CepService;
+import com.desafio.cep_service.application.usecase.CadastrarEnderecoService;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -17,8 +19,13 @@ import tools.jackson.databind.type.LogicalType;
 @Configuration(proxyBeanMethods = false)
 public class CepConfiguration {
     @Bean
-    CepService cepService(ConsultaCepPort consultaCepPort) {
-        return new CepService(consultaCepPort);
+    CadastrarEnderecoService cadastrarEnderecoService(EnderecoRepositoryPort repository) {
+        return new CadastrarEnderecoService(repository);
+    }
+
+    @Bean
+    CepService cepService(ConsultaCepPort consultaCepPort, EnderecoRepositoryPort enderecoRepository) {
+        return new CepService(consultaCepPort, enderecoRepository);
     }
 
     @Bean

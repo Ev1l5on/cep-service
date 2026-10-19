@@ -4,6 +4,10 @@ import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
 import com.desafio.cep_service.application.usecase.CepService;
+import com.desafio.cep_service.application.port.out.EnderecoRepositoryPort;
+import com.desafio.cep_service.application.exception.FalhaPersistenciaEnderecoException;
+import com.desafio.cep_service.domain.model.Endereco;
+import java.util.Optional;
 import com.desafio.cep_service.infrastructure.adapter.out.viacep.ViaCepClient;
 import com.desafio.cep_service.infrastructure.config.CepConfiguration;
 import org.junit.jupiter.api.BeforeEach;
@@ -27,6 +31,7 @@ import java.net.SocketTimeoutException;
 import java.time.Instant;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.*;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.requestTo;
 import static org.springframework.test.web.client.response.MockRestResponseCreators.*;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
@@ -35,13 +40,16 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 class CepControllerTest {
     private MockMvc mvc;
     private MockRestServiceServer server;
+    private EnderecoRepositoryPort repository;
 
     @BeforeEach
     void setup() {
         RestClient.Builder builder = new CepConfiguration()
                 .viaCepRestClient("https://viacep.com.br/ws", 2000, 5000).mutate();
         server = MockRestServiceServer.bindTo(builder).build();
-        CepService service = new CepService(new ViaCepClient(builder.build()));
+        repository = mock(EnderecoRepositoryPort.class);
+        when(repository.salvar(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        CepService service = new CepService(new ViaCepClient(builder.build()), repository);
         mvc = MockMvcBuilders.standaloneSetup(new CepController(service))
                 .setControllerAdvice(new ApiExceptionHandler()).build();
     }
@@ -68,6 +76,7 @@ class CepControllerTest {
         // Nenhuma expectativa HTTP: o mock falha se o adaptador for acionado.
         validarErro(mvc.perform(get("/api/ceps/{cep}", cep)), 400,
                 "Bad Request", "O CEP deve conter exatamente 8 dígitos", "/api/ceps/" + cep);
+        verifyNoInteractions(repository);
         server.verify();
     }
 
@@ -101,6 +110,7 @@ class CepControllerTest {
                 .andRespond(withException(new SocketTimeoutException("read timed out token=segredo-interno")));
         validarErro(mvc.perform(get("/api/ceps/01001000")), 504, "Gateway Timeout",
                 "Tempo limite excedido ao consultar o serviço de CEP");
+        verify(repository, never()).salvar(any());
         server.verify();
     }
 
@@ -159,6 +169,40 @@ class CepControllerTest {
             logger.detachAppender(appender);
             appender.stop();
         }
+    }
+
+    @Test
+    void enderecoNoBancoMantemContratoSemAcionarClienteExterno() throws Exception {
+        when(repository.buscarPorCep("01001000")).thenReturn(Optional.of(
+                new Endereco("01001-000", "Praça da Sé", "lado ímpar", "Sé", "São Paulo", "SP")));
+        mvc.perform(get("/api/ceps/01001000"))
+                .andExpect(status().isOk())
+                .andExpect(content().json("""
+                        {"cep":"01001-000","logradouro":"Praça da Sé","complemento":"lado ímpar",
+                         "bairro":"Sé","localidade":"São Paulo","uf":"SP","erro":null}
+                        """, JsonCompareMode.STRICT));
+        verify(repository, never()).salvar(any());
+        server.verify();
+    }
+
+    @ParameterizedTest
+    @CsvSource({"LEITURA,INDISPONIBILIDADE,503", "GRAVACAO,INDISPONIBILIDADE,503",
+            "LEITURA,ERRO,500", "GRAVACAO,ERRO,500", "GRAVACAO,CONFLITO_NAO_RECUPERADO,500"})
+    void falhaDoBancoMantemErroSeguroSemFallbackIndevido(String operacao, String motivo, int status)
+            throws Exception {
+        var op = FalhaPersistenciaEnderecoException.Operacao.valueOf(operacao);
+        var reason = FalhaPersistenciaEnderecoException.Motivo.valueOf(motivo);
+        var exception = new FalhaPersistenciaEnderecoException(op, reason,
+                new RuntimeException("SELECT * FROM enderecos password=segredo-interno"));
+        if (op == FalhaPersistenciaEnderecoException.Operacao.LEITURA) {
+            when(repository.buscarPorCep("01001000")).thenThrow(exception);
+        } else {
+            responderJson("{\"cep\":\"01001-000\",\"localidade\":\"São Paulo\",\"uf\":\"SP\"}");
+            when(repository.salvar(any())).thenThrow(exception);
+        }
+        validarErro(mvc.perform(get("/api/ceps/01001000")), status,
+                status == 503 ? "Service Unavailable" : "Internal Server Error", exception.getMessage());
+        server.verify();
     }
 
     private void responderJson(String body) {
