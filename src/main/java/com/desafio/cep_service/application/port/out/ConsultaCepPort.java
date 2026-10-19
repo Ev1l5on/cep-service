@@ -5,6 +5,10 @@ import com.desafio.cep_service.domain.model.Endereco;
 import java.util.Optional;
 
 public interface ConsultaCepPort {
-    /** Retorna vazio quando o provedor não encontra o CEP; falhas de integração são propagadas. */
+    /**
+     * Retorna vazio somente quando o provedor informa que o CEP não existe.
+     * @throws com.desafio.cep_service.application.exception.FalhaConsultaCepException
+     *         em falhas de transporte ou respostas externas inválidas
+     */
     Optional<Endereco> buscar(String cep);
 }
