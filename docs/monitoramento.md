@@ -1,5 +1,7 @@
 # Monitoramento do CEP Service — etapa 09
 
+[README](../README.md) · [Arquitetura](arquitetura.md)
+
 ## Arquitetura e escopo
 
 A infraestrutura Actuator/Micrometer expoe metricas HTTP e JVM em

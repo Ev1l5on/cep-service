@@ -1,5 +1,10 @@
 # Etapas 05 e 06: eventos de consulta e auditoria assincrona
 
+[README](../README.md) · [Diagramas](arquitetura.md) · [Decisoes](decisoes-arquiteturais.md)
+
+Documento operacional da auditoria. As evidencias e o inventario ao final sao
+registros historicos das etapas 05/06; configuracoes de execucao refletem o Compose atual.
+
 ## Fluxo e fronteiras
 
 `GET /api/ceps/{cep}` continua validando a entrada e consultando PostgreSQL
@@ -63,8 +68,9 @@ O cluster ID deve permanecer estavel para reutilizar esse volume.
 O listener EXTERNAL e publicado somente em 127.0.0.1. `KAFKA_PORT` e
 `KAFKA_ADVERTISED_HOST` controlam a porta/endereco anunciados ao host. Se alterar
 a porta, atualize tambem KAFKA_BOOTSTRAP_SERVERS no processo Java. O listener
-INTERNAL continua usando kafka:29092. Para a etapa 07, injete tambem
-POSTGRES_HOST=postgres e POSTGRES_PORT=5432 no servico app do Compose (configurados automaticamente).
+INTERNAL continua usando kafka:29092. O servico app ja declara
+POSTGRES_HOST=postgres e POSTGRES_PORT=5432 automaticamente. Credenciais
+PostgreSQL e Grafana exigidas pelo Compose estao descritas no README.
 
 | Variavel | Padrao |
 | --- | --- |
@@ -95,6 +101,8 @@ set -a
 . ./.env
 set +a
 ./mvnw clean test
+# Para executar a JVM no host sem conflito com o app Docker:
+docker compose stop app
 ./mvnw spring-boot:run
 ```
 

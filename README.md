@@ -1,457 +1,284 @@
 # CEP Service
 
-A etapa 07 adiciona a aplicacao ao Docker Compose. As etapas 05 e 06 incluem
-auditoria assincrona via Kafka e PostgreSQL.
-Contrato do evento, retry, DLT, limites de confiabilidade e instrucoes de
-operacao: [docs/auditoria-kafka.md](docs/auditoria-kafka.md).
+API REST para consulta de CEP e cadastro manual de endereços, desenvolvida para um desafio técnico de engenharia de software sênior. Consulta primeiro o PostgreSQL, recorre ao ViaCEP somente na ausência de cadastro e registra consultas bem-sucedidas por auditoria assíncrona com Kafka.
 
-## Iniciar o sistema completo com Docker
+O projeto reúne arquitetura hexagonal, integridade transacional, tratamento seguro de erros e observabilidade em um ambiente local reproduzível com Docker Compose.
 
-Pre-requisitos: Docker Engine/Desktop em execucao, Docker Compose v2 ou superior,
-portas locais 8080, 5432, 9092, 9090 e 3000 livres e acesso a internet para baixar imagens,
-dependencias Maven e consultar ViaCEP. Nao e necessario instalar Java ou Maven
-no host para executar o sistema completo. As imagens Temurin Java 21, PostgreSQL
-17 e Kafka 4.1.1 suportam ARM64 (Apple Silicon) e AMD64; nao se forca emulacao.
+| Documentação | Conteúdo |
+| --- | --- |
+| [Arquitetura](docs/arquitetura.md) | Contexto, containers, componentes e sequências em Mermaid |
+| [Decisões arquiteturais](docs/decisoes-arquiteturais.md) | SOLID, consistência, concorrência, confiabilidade e trade-offs |
+| [Auditoria Kafka](docs/auditoria-kafka.md) | Contrato JSON, configuração, retries, DLT e idempotência |
+| [Monitoramento](docs/monitoramento.md) | Dashboard, PromQL, operação e evidências da validação anterior |
 
-1. Se ainda nao existir, copie `.env.example` para `.env`.
-2. Preencha `POSTGRES_PASSWORD` e `GRAFANA_ADMIN_PASSWORD` somente no `.env`,
-   com senhas diferentes geradas localmente
-   (por exemplo, `openssl rand -hex 24`). Nunca versione esse arquivo. Em um volume
-   existente, preserve as credenciais ja utilizadas; editar `.env` nao troca a senha
-   armazenada pelo PostgreSQL.
-3. Inicie todos os servicos:
+## Requisitos atendidos
+
+| Funcionais | Comportamento implementado |
+| --- | --- |
+| Consultar CEP | `GET /api/ceps/{cep}`, com exatamente oito dígitos na entrada |
+| Priorizar cadastro local | Retorna do PostgreSQL sem acionar ViaCEP quando o endereço existe |
+| Consultar provedor externo | ViaCEP apenas após ausência confirmada; resultado válido é persistido antes do retorno |
+| Cadastrar endereço manualmente | `POST /api/enderecos`, com validação e conflito 409 por CEP duplicado |
+| Auditar consultas | GET bem-sucedido gera evento com CEP, instante UTC, origem e seis campos do endereço |
+| Persistir auditoria | Consumer Kafka grava no PostgreSQL com idempotência por `eventId` |
+
+Requisitos não funcionais tratados: separação entre negócio e infraestrutura, consultas parametrizadas, transações curtas, timeouts externos, respostas de erro sem detalhes técnicos, testes sem dependência do ViaCEP público, execução como usuário não root no container e monitoramento HTTP/JVM.
+
+O ambiente é de desenvolvimento e avaliação: não há autenticação da API, alta disponibilidade, garantia de auditoria sem perdas ou SLO de desempenho estabelecido.
+
+## Stack
+
+| Componente | Versão / uso |
+| --- | --- |
+| Java / Spring Boot | 21 / 4.1.1 |
+| Maven | Wrapper do projeto, distribuição 3.10.0 |
+| HTTP | Spring MVC e `RestClient` |
+| Persistência | PostgreSQL 17, Spring Data JPA para endereços e `JdbcTemplate` para auditoria |
+| Migrações | Flyway, com versões gerenciadas pelo Spring Boot |
+| Mensageria | Apache Kafka 4.1.1, broker único em KRaft |
+| Monitoramento | Actuator, Micrometer, Prometheus 3.14.0 e Grafana 13.2.2 |
+| Ambiente | Docker Compose; imagens compatíveis com ARM64 e AMD64 |
+
+## Executar com Docker Compose
+
+Pré-requisitos: Git, Docker Engine/Desktop em execução e Docker Compose v2 com suporte a `--wait`. As portas locais padrão são 8080, 5432, 9092, 9090 e 3000. O primeiro build exige internet para imagens e dependências; somente consultas de CEPs ausentes precisam do ViaCEP em tempo de execução. Java/Maven no host são necessários apenas para execução local e testes.
 
 ```sh
-docker compose up -d --build
+git clone https://github.com/Ev1l5on/cep-service.git
+cd cep-service
+# Execute a cópia somente se ainda não houver .env local.
+if [ ! -f .env ]; then cp .env.example .env; fi
 ```
 
-O primeiro build baixa as dependencias. Para aguardar tambem os healthchecks:
+Edite `.env` e preencha `POSTGRES_PASSWORD` e `GRAFANA_ADMIN_PASSWORD` com senhas locais diferentes. `openssl rand -hex 24` pode gerar cada senha; não a inclua em arquivos versionados. Preserve as credenciais de volumes já inicializados. O `.env` é ignorado pelo Git e excluído do contexto de build.
 
 ```sh
-docker compose up -d --build --wait --wait-timeout 240
+docker compose config --quiet
+docker compose up -d --build
+# Aguarda saúde após a construção da imagem.
+docker compose up -d --wait --wait-timeout 240
 docker compose ps
 curl --fail http://localhost:8080/actuator/health
 ```
 
-O esperado e `app`, `postgres`, `kafka`, `prometheus` e `grafana` saudaveis,
-e `status: UP` no Actuator.
-O app aguarda os healthchecks das dependencias. Flyway aplica/valida V1 e V2 e
-o KafkaAdmin cria automaticamente os topicos de consulta e DLT; nao e necessario
-criar tabelas ou topicos manualmente. O healthcheck do app verifica o Actuator e
-a conexao de banco; nao substitui a verificacao do fluxo Kafka ate o PostgreSQL.
+Resultado esperado: `app`, `postgres`, `kafka`, `prometheus` e `grafana` com status `healthy`; Actuator com `status: UP`. Flyway aplica/valida V1 e V2, Hibernate valida a entidade de endereço e KafkaAdmin cria os tópicos necessários. Não é preciso criar tabelas ou tópicos manualmente.
 
-| Configuracao | IntelliJ / JVM no Mac | App no Docker Compose |
-| --- | --- | --- |
-| PostgreSQL | `localhost:${POSTGRES_PORT:-5432}` | `postgres:5432` |
-| Kafka | `localhost:${KAFKA_PORT:-9092}` | `kafka:29092` |
-| HTTP | `localhost:8080` | `localhost:${APP_PORT:-8080}` |
-| Variaveis | exportar ou configurar na IDE | `environment` do servico `app` |
+O app aguarda PostgreSQL e Kafka saudáveis; Prometheus aguarda o app; Grafana aguarda Prometheus. Essa ordenação vale na inicialização, não é um mecanismo de recuperação automática de dependências durante a execução.
 
-Os valores da coluna local representam variaveis shell, com seus valores padrao.
-O Compose usa `.env` para interpolacao e injeta as variaveis declaradas no app.
-Hosts/portas internos permanecem fixos, mesmo ao alterar portas publicadas no Mac.
-A API e as portas PostgreSQL/Kafka sao publicadas somente em `127.0.0.1`.
-Para mudar a porta HTTP publicada, configure `APP_PORT` no `.env`; dentro do
-container, a aplicacao continua usando 8080. Nao execute a JVM local e o app
-Docker simultaneamente na mesma porta; use `docker compose stop app` antes da IDE.
+### Variáveis de ambiente
 
-### Consultar e cadastrar enderecos
+| Variável | Padrão / finalidade |
+| --- | --- |
+| `POSTGRES_DB`, `POSTGRES_USER` | `cep_service` |
+| `POSTGRES_PASSWORD` | Obrigatória, sem valor padrão |
+| `POSTGRES_HOST`, `POSTGRES_PORT` | JVM local: `localhost`, `5432`; Compose app: `postgres`, `5432` |
+| `KAFKA_BOOTSTRAP_SERVERS` | JVM local: `localhost:9092`; Compose app: `kafka:29092` |
+| `KAFKA_PORT` | `9092`, porta publicada no host |
+| `APP_PORT` | `8080`, porta HTTP publicada no host |
+| `GRAFANA_ADMIN_USER` | `admin` |
+| `GRAFANA_ADMIN_PASSWORD` | Obrigatória no Compose, sem valor padrão |
+| `VIACEP_BASE_URL` | `https://viacep.com.br/ws` |
+| `VIACEP_CONNECT_TIMEOUT_MS`, `VIACEP_READ_TIMEOUT_MS` | `2000` / `5000` ms, positivos |
+
+O Compose injeta explicitamente os hosts e portas internos no app, independentemente das portas publicadas no host. Ao mudar `KAFKA_PORT`, ajuste também `KAFKA_BOOTSTRAP_SERVERS` na JVM local. `.env` serve à interpolação do Compose; não é carregado automaticamente pelo Java ou IntelliJ. Demais opções de tópicos, grupo, fila e retries estão em [auditoria Kafka](docs/auditoria-kafka.md).
+
+Alterar as variáveis PostgreSQL ou a senha inicial do Grafana não redefine credenciais em volumes existentes. Faça eventual rotação pela administração de cada serviço, sem remover volumes.
+
+## Testar a API
+
+Os comandos usam as portas padrão; adapte a URL se alterar `APP_PORT`.
+
+### Consultar um CEP
 
 ```sh
-curl --fail http://localhost:8080/api/ceps/01001000
+curl -i http://localhost:8080/api/ceps/01001000
+```
 
+Resposta 200 exemplificativa; o endereço depende do cadastro local ou do provedor:
+
+```json
+{
+  "cep": "01001-000",
+  "logradouro": "Praça da Sé",
+  "complemento": "lado ímpar",
+  "bairro": "Sé",
+  "localidade": "São Paulo",
+  "uf": "SP",
+  "erro": null
+}
+```
+
+O modelo `Endereco` e os snapshots de auditoria possuem **seis campos**. O GET mantém um sétimo campo, `erro: null`, por compatibilidade do contrato REST. O banco armazena CEP sem hífen; a resposta usa `00000-000`.
+
+### Cadastrar manualmente e consultar sem ViaCEP
+
+Use um CEP ainda não cadastrado no seu ambiente:
+
+```sh
 curl -i -X POST http://localhost:8080/api/enderecos \
   -H 'Content-Type: application/json' \
   -d '{"cep":"12345678","logradouro":"Rua manual","complemento":"Casa 1","bairro":"Centro","localidade":"São Paulo","uf":"SP"}'
 
-curl --fail http://localhost:8080/api/ceps/12345678
+curl -i http://localhost:8080/api/ceps/12345678
 ```
 
-O primeiro cadastro retorna 201 e repetir o mesmo CEP retorna 409. O GET retorna
-200 com os sete campos originais, priorizando o cadastro local. Um CEP ausente
-no banco e consultado no ViaCEP e persistido antes da resposta. A publicacao do
-evento acontece em executor separado, sem aguardar Kafka ou gravacao da auditoria.
-POST nao publica eventos de consulta.
+O POST retorna **201**, `Location: /api/ceps/12345678` e os seis campos persistidos, com CEP formatado. Repetir o cadastro retorna **409**, sem sobrescrever dados. O POST não consulta ViaCEP nem publica evento de consulta.
 
-### Verificar auditoria e migracoes
+O CEP deve ter oito dígitos, a localidade deve estar preenchida e ter até 255 caracteres, e a UF deve ser uma sigla brasileira válida em maiúsculas. Logradouro, complemento e bairro podem ser nulos. O cadastro valida estrutura, não a existência do CEP no serviço postal.
 
-Cada GET bem-sucedido gera um novo `eventId`. A auditoria e eventual: aguarde o
-consumer antes de consultar o registro. Os comandos abaixo usam as credenciais
-ja presentes no container, sem imprimi-las:
+**Prioridade manual:** o GET prioriza todo registro local, inclusive o manual. Não há coluna de origem na tabela `enderecos`, atualização de cadastro ou substituição automática de um resultado ViaCEP anterior. Se o CEP já estiver salvo, o POST manual também retorna 409. Em uma disputa, vence a primeira gravação confirmada; se o manual for gravado enquanto um GET aguarda ViaCEP, esse GET recupera o registro manual após o conflito.
 
-```sh
-docker compose exec -T postgres sh -c 'exec psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"' <<'SQL'
-SELECT version, description, success FROM flyway_schema_history ORDER BY installed_rank;
-SELECT cep, logradouro, localidade, uf FROM enderecos ORDER BY id DESC LIMIT 10;
-SELECT event_id, cep, consulted_at, source, response_data
-FROM consulta_logs ORDER BY id DESC LIMIT 10;
-SELECT event_id, count(*) FROM consulta_logs GROUP BY event_id HAVING count(*) > 1;
-SQL
+### Códigos HTTP e erros
 
-docker compose exec kafka /opt/kafka/bin/kafka-topics.sh \
-  --bootstrap-server kafka:29092 --list
-docker compose exec kafka /opt/kafka/bin/kafka-consumer-groups.sh \
-  --bootstrap-server kafka:29092 --describe --group cep-service-auditoria-v1
-docker compose logs --tail=100 app
-```
-
-Topicos padrao: `cep-consultas-v1` e `cep-consultas-v1.DLT`. Consulta e DLT tem
-3 particoes; nomes/grupo podem ser sobrescritos por variaveis de ambiente.
-Particoes vazias podem mostrar offset/lag `-`. Reentregar o mesmo `eventId` nao
-cria outro log, devido a constraint UNIQUE e ao INSERT idempotente do consumidor.
-Um novo GET tem novo `eventId` e, portanto, cria outro log normalmente.
-Falhas do producer nao alteram o sucesso HTTP; envio direto em memoria pode
-perder eventos em falhas do processo, indisponibilidade prolongada ou fila cheia.
-Retry, DLT e limites estao descritos em [auditoria Kafka](docs/auditoria-kafka.md).
-
-### Build, recursos e operacao
-
-O `Dockerfile` usa Maven Wrapper/JDK 21 no build e apenas o JAR executavel com
-JRE 21 no runtime. Dependencias Maven usam cache BuildKit. O contexto e limitado
-por `.dockerignore`, excluindo `.env`, credenciais, Git, IDE e artefatos locais.
-O processo Java executa como UID/GID 10001, sem root; curl verifica o Actuator.
-Nao ha fontes nem credenciais embutidas na imagem final.
-
-O build da imagem executa `package -DskipTests`, compilando os testes sem
-executa-los, porque os testes de integracao dependem de PostgreSQL/Kafka reais
-fora do ambiente isolado de build. Isso nao muda o POM nem desativa a suite:
-execute obrigatoriamente a validacao completa separada, conforme abaixo.
-
-O app tem limite local de 768 MiB, 1 CPU e heap de ate 70% da memoria disponivel.
-Esses limites podem ser ajustados no Compose se o ambiente exigir. Os logs vao
-para stdout/stderr. `restart: unless-stopped` reinicia o app se o processo falhar
-ou o Docker reiniciar; um `stop` explicito e respeitado. A parada permite ate 60s
-para encerrar HTTP, executor e consumer. `depends_on` ordena a inicializacao,
-mas nao recupera automaticamente dependencias que falhem depois: PostgreSQL e
-Kafka preservam sua configuracao existente e podem exigir reinicio manual.
-
-```sh
-# Parar todos os servicos, preservando containers e volumes.
-docker compose stop
-# Retomar e aguardar a saude das dependencias e do app.
-docker compose up -d --wait
-# Reiniciar apenas a aplicacao.
-docker compose restart app
-```
-
-Os volumes `postgres_data` e `kafka_data` permanecem intactos. Preserve o nome
-do projeto Compose para reutiliza-los. Nunca utilize `docker compose down -v`.
-As imagens e o broker unico sao adequados ao desafio local; nao representam
-alta disponibilidade ou configuracao de seguranca para producao.
-
-### Executar a suite completa
-
-Requer Java 21 no host. Inicie as dependencias e disponibilize `.env` ao processo
-Maven (somente atribuicoes shell confiaveis, sem imprimir credenciais):
-
-```sh
-docker compose up -d --wait postgres kafka
-set -a
-. ./.env
-set +a
-./mvnw clean test
-git diff --check
-```
-
-Os 207 testes existentes incluem PostgreSQL/Kafka reais em schemas/topicos
-isolados e nao dependem do ViaCEP publico. Os schemas/topicos de teste permanecem
-no ambiente; use infraestrutura dedicada em execucoes recorrentes.
-
-## Monitoramento — etapa 09
-
-O Compose tambem inicia Prometheus e Grafana, com datasource e dashboard
-provisionados automaticamente, sem configuracao manual pela interface.
-
-- API / saude: <http://localhost:8080/actuator/health>.
-- Metricas Micrometer: <http://localhost:8080/actuator/prometheus>.
-- Prometheus / targets: <http://localhost:9090/targets>.
-- Grafana: <http://localhost:3000>.
-- Dashboard **CEP Service — Observabilidade**:
-  <http://localhost:3000/d/cep-service-observabilidade>.
-
-Preencha `GRAFANA_ADMIN_USER` e `GRAFANA_ADMIN_PASSWORD` no `.env` antes de subir
-o ambiente; nunca versione senhas. Para um `.env` antigo, acrescente essas duas
-variaveis conforme `.env.example`, preservando as credenciais PostgreSQL existentes.
-O usuario padrao e `admin`; nao existe senha padrao no Compose. As credenciais
-inicializam o volume Grafana somente na primeira execucao: alterar `.env` depois
-nao redefine a senha armazenada.
-
-O Prometheus coleta `app:8080/actuator/prometheus` a cada 15s pela rede interna.
-Os sete paineis mostram volume HTTP, requisicoes/s, p95, erros 5xx,
-disponibilidade de scrape, memoria JVM e CPU do processo. Healthchecks e scrapes
-sao excluidos dos paineis de trafego HTTP. Aguarde pelo menos dois scrapes e gere
-requisicoes para visualizar taxas e percentis.
-
-Configuracao, PromQL, geracao de trafego, validacao e limites conhecidos em
-[docs/monitoramento.md](docs/monitoramento.md). Os novos servicos usam volumes
-`prometheus_data` e `grafana_data`; `docker compose stop` preserva todos os volumes.
-
-## Organizacao da consulta de CEP
-
-O pacote base permanece `com.desafio.cep_service`:
-
-- `domain.model`: `Cep` valida exatamente oito digitos e `Endereco` representa
-  o resultado interno, sem dependencias de Spring, Jackson ou ViaCEP.
-- `domain.exception`: excecoes de CEP invalido e nao encontrado.
-- `application.usecase.CepService`: valida e coordena a consulta pela porta
-  `application.port.out.EnderecoRepositoryPort` primeiro; somente a ausencia
-  confirmada permite consultar `ConsultaCepPort` e persistir o resultado.
-- `infrastructure.adapter.in.rest`: controller e DTO publico `CepResponse`.
-- `infrastructure.adapter.out.viacep`: cliente HTTP e DTO externo `ViaCepResponse`.
-  Somente esse adaptador interpreta o campo externo `erro`.
-- `infrastructure.adapter.out.persistence`: entidade JPA, repositorio Spring Data
-  e adaptador PostgreSQL, separados do modelo de dominio.
-- `infrastructure.config.CepConfiguration`: monta o caso de uso e o cliente HTTP
-  com injecao por construtor, mantendo o nucleo independente do Spring.
-
-`GET /api/ceps/{cep}` preserva os campos `cep`, `logradouro`, `complemento`,
-`bairro`, `localidade`, `uf` e `erro` (null no sucesso). As excecoes de validacao
-e ausencia continuam sendo subclasses de `IllegalArgumentException`, com as
-mesmas mensagens, agora traduzidas pelo advice REST para 400 e 404.
-
-Os testes cobrem validacao, delegacao pela porta, ausencia, falha de integracao,
-mapeamento HTTP do ViaCEP e contrato REST. O teste de contexto continua exigindo
-o PostgreSQL e as variaveis de ambiente descritas abaixo.
-
-## Tratamento HTTP e integracao ViaCEP
-
-O `ApiExceptionHandler` centraliza respostas com exatamente `timestamp` (UTC em
-ISO-8601), `status`, `error`, `message` e `path` (sem query string).
-Detalhes tecnicos, corpo do provedor e stack traces nao sao enviados ao consumidor.
-
-| Situacao | HTTP da API |
+| Status | Situação |
 | --- | --- |
-| CEP sem exatamente oito digitos, sem chamada ao ViaCEP | 400 |
-| ViaCEP retorna `erro=true` ou `erro="true"` | 404 |
-| Corpo ausente/vazio, JSON malformado, tipo de dado incorreto ou dados inconsistentes | 502 |
-| HTTP externo inesperado, inclusive 400/401/404/500/502 | 502 |
-| HTTP externo 429/503 ou falha de transporte sem timeout (conexao recusada, DNS, TLS) | 503 |
-| Timeout de conexao/leitura ou HTTP externo 408/504 | 504 |
-| Indisponibilidade/transitoriedade do PostgreSQL na leitura ou gravacao | 503 |
-| Outras falhas de persistencia ou conflito sem registro recuperavel | 500 |
-| Falha interna inesperada | 500, com mensagem generica |
+| 200 / 201 | Consulta / cadastro concluído |
+| 400 | CEP ou cadastro inválido; corpo JSON inválido |
+| 404 | CEP inexistente confirmado pelo indicador `erro` do ViaCEP |
+| 405 | Método HTTP não suportado para a rota |
+| 409 | CEP já cadastrado no POST |
+| 502 | Resposta externa inválida, vazia ou HTTP externo inesperado |
+| 503 | Indisponibilidade do ViaCEP ou PostgreSQL |
+| 504 | Timeout de conexão/leitura do ViaCEP |
+| 500 | Falha interna ou outra falha de persistência |
 
-Somente o indicador `erro` confirmado representa CEP inexistente. O ViaCEP real
-tambem envia esse indicador como string; a desserializacao aceita estritamente
-booleanos ou strings `"true"`/`"false"`, rejeitando numeros e outras strings.
-O CEP retornado deve corresponder ao solicitado; localidade deve estar preenchida
-e UF deve ser uma sigla valida. Logradouro, bairro e complemento podem ser vazios
-ou ausentes em CEPs de localidades. Campos adicionais do provedor sao ignorados.
+```sh
+curl -i http://localhost:8080/api/ceps/invalido
+```
 
-O adaptador traduz erros tecnicos para `FalhaConsultaCepException`, definida na
-aplicacao sem dependencias HTTP. O advice decide os status HTTP. Os logs de falhas
-sao emitidos uma unica vez pelo advice, com path, motivo, codigo de diagnostico
-e classe da causa. Mensagens tecnicas e corpos externos nao sao registrados,
-pois podem conter dados sensiveis. Erros de validacao e CEP inexistente nao geram
-logs de falha de integracao.
-
-Configuracoes em `application.properties`, com sobrescrita por ambiente:
-
-| Propriedade | Variavel | Padrao |
-| --- | --- | --- |
-| `viacep.base-url` | `VIACEP_BASE_URL` | `https://viacep.com.br/ws` |
-| `viacep.connect-timeout-ms` | `VIACEP_CONNECT_TIMEOUT_MS` | `2000` ms |
-| `viacep.read-timeout-ms` | `VIACEP_READ_TIMEOUT_MS` | `5000` ms |
-
-Timeouts devem ser inteiros positivos; zero ou valores negativos impedem a
-inicializacao. O `RestClient` e injetado no adaptador, com timeouts configurados
-na infraestrutura. O timeout de leitura limita a espera de leitura do socket,
-nao o tempo total da requisicao. Nao ha politica de retry implementada na aplicacao.
-
-Os testes do cliente e da API utilizam HTTP simulado, incluindo o fluxo completo
-controller, caso de uso, adaptador e advice. Um servidor HTTP local valida o
-timeout efetivo de leitura. Nenhum teste automatizado consulta o ViaCEP publico.
-
-## PostgreSQL local
-
-O resultado da revisao dos 15 requisitos da etapa 04 esta em
-[docs/auditoria-etapa-04.md](docs/auditoria-etapa-04.md).
-
-### Cadastro manual
-
-`POST /api/enderecos` recebe os seis campos de endereco:
+Exemplo de resposta 400; `timestamp` varia:
 
 ```json
 {
-  "cep": "12345678",
-  "logradouro": "Rua manual",
-  "complemento": "Casa 1",
-  "bairro": "Centro",
-  "localidade": "São Paulo",
-  "uf": "SP"
+  "timestamp": "2026-10-19T12:00:00Z",
+  "status": 400,
+  "error": "Bad Request",
+  "message": "O CEP deve conter exatamente 8 dígitos",
+  "path": "/api/ceps/invalido"
 }
 ```
 
-O CEP deve conter exatamente oito digitos, a localidade deve ser preenchida
-(ate 255 caracteres) e UF deve ser uma sigla brasileira valida em maiusculas.
-Logradouro, complemento e bairro podem ser nulos. Entradas invalidas retornam
-400 antes de acessar o banco. O cadastro manual nao consulta o ViaCEP.
+O `ApiExceptionHandler` centraliza esse formato. Falha PostgreSQL nunca significa ausência de CEP e não autoriza fallback para ViaCEP. Apenas `erro=true` ou `erro="true"` do provedor significa CEP inexistente; HTTP 404 externo inesperado resulta em 502. HTTP externos 408/504 resultam em 504 e 429/503 em 503.
 
-O sucesso retorna 201, os seis campos persistidos (CEP no formato `12345-678`)
-e `Location: /api/ceps/12345678`. O GET mantem seu contrato anterior com sete
-campos, incluindo `erro: null`, e prioriza o registro armazenado manualmente.
+## Arquitetura e organização
 
-CEP ja cadastrado retorna 409 no formato padronizado de erro. O cadastro nao
-sobrescreve registros existentes, independentemente da origem. A constraint
-UNIQUE protege tambem cadastros simultaneos: um retorna 201 e o outro 409.
-Falhas de gravacao preservam os retornos 503/500 seguros da persistencia.
-Nao foi necessario alterar a migracao ou criar novos campos no dominio/banco.
+As dependências de tecnologia apontam para as portas da aplicação; domínio e casos de uso não importam Spring, JPA, Kafka ou classes HTTP. `CepConfiguration` monta os casos de uso por construtor. Não há interfaces de entrada redundantes para os três casos de uso atuais.
 
-Requisitos: Java 21 e Docker Desktop com Docker Compose. A imagem oficial
-`postgres:17-bookworm` permite execucao nativa em Apple Silicon, sem forcar amd64.
+```text
+src/main/java/com/desafio/cep_service/
+├── domain/
+│   ├── model/             # Cep e Endereco
+│   └── exception/         # Invariantes de entrada e ausência
+├── application/
+│   ├── usecase/           # CepService, CadastrarEnderecoService, RegistrarConsultaService
+│   ├── port/out/          # ViaCEP, endereços, publicação e logs
+│   ├── event/             # ConsultaCepEvento
+│   └── exception/         # Falhas sem dependência de HTTP
+└── infrastructure/
+    ├── adapter/in/        # REST e listener Kafka
+    ├── adapter/out/       # ViaCEP, PostgreSQL e producer Kafka
+    ├── config/            # Composição de dependências e configuração técnica
+    └── serialization/     # Contrato JSON da mensageria
+src/main/resources/db/migration/  # V1 enderecos; V2 consulta_logs
+src/test/java/                   # Testes unitários, REST e integração
+monitoring/                      # Prometheus, provisionamento e dashboard Grafana
+docs/                            # Diagramas, decisões, operação e apresentação
+```
 
-1. Copie `.env.example` para `.env`, se ainda nao existir.
-2. Gere uma senha com `openssl rand -hex 24` e preencha `POSTGRES_PASSWORD`
-   somente no `.env`. Esse arquivo e ignorado pelo Git.
-3. Inicie as dependencias:
+[Diagramas de contexto, containers, componentes e sequências](docs/arquitetura.md).
+
+V1 cria `enderecos`, com chave técnica, seis campos, timestamps e `UNIQUE(cep)`. V2 cria `consulta_logs`, com UUID único do evento, versão, CEP, instante UTC, origem, snapshot JSONB e data de gravação. Os índices das constraints UNIQUE atendem às buscas por CEP e idempotência; não há índices extras para relatórios. Migrações aplicadas não devem ser editadas. `ddl-auto=validate`, `open-in-view=false` e `spring.flyway.clean-disabled=true` são mantidos.
+
+Cada operação de persistência usa uma transação local curta. Não há transação aberta durante a chamada ao ViaCEP. A constraint arbitra concorrência; a recuperação do GET acontece depois do rollback, em nova transação.
+
+## Auditoria assíncrona
+
+Após obter um endereço confirmado, `CepService` cria `ConsultaCepEvento` com `eventId` UUID novo, `eventVersion=1`, CEP, `consultedAt` UTC, origem `DATABASE`/`VIACEP` e snapshot dos seis campos. Origem representa a fonte efetivamente retornada, não a procedência histórica do cadastro.
+
+`PublicarConsultaPort` leva ao `KafkaConsultaPublisher`, que enfileira em executor de dois workers e fila limitada a 1000 tarefas. O worker envia JSON ao tópico `cep-consultas-v1`, usando o CEP como chave. O HTTP não aguarda confirmação Kafka nem persistência do log. Falhas imediatas, rejeição da fila e falhas assíncronas geram diagnóstico seguro e preservam o retorno da consulta.
+
+O `ConsultaAuditoriaListener` delega a `RegistrarConsultaService`; a gravação usa SQL parametrizado e `ON CONFLICT (event_id) DO NOTHING`. O commit PostgreSQL ocorre antes do retorno do listener e do commit do offset. Reentregas do mesmo evento mantêm uma linha; novos GETs geram novos eventos e novos logs.
+
+O consumidor tenta processar até três vezes por padrão, com 1s entre tentativas. Evento estruturalmente inválido vai direto à DLT. Falha persistente após retries segue para `cep-consultas-v1.DLT`, com confirmação de envio; se a DLT falhar, o offset não é confirmado. Não há reprocessamento automático da DLT.
+
+**Limite de entrega:** a fila do producer está em memória e pode perder eventos. Após aceite pelo Kafka, há processamento com possibilidade de reentrega e persistência idempotente, sujeito à retenção e durabilidade do ambiente. Não há transação distribuída, transactional outbox ou garantia exactly-once de ponta a ponta.
+
+### Comprovar a gravação e acompanhar consumo
+
+A auditoria é eventual: aguarde o consumidor e consulte o PostgreSQL, não apenas logs:
+
+```sh
+docker compose exec -T postgres sh -c 'exec psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"' <<'SQL'
+SELECT version, success FROM flyway_schema_history ORDER BY installed_rank;
+SELECT cep, logradouro, localidade, uf FROM enderecos ORDER BY id DESC LIMIT 5;
+SELECT event_id, cep, consulted_at, source, response_data
+FROM consulta_logs ORDER BY id DESC LIMIT 5;
+SELECT event_id, count(*) FROM consulta_logs GROUP BY event_id HAVING count(*) > 1;
+SQL
+
+docker compose exec kafka /opt/kafka/bin/kafka-consumer-groups.sh \
+  --bootstrap-server kafka:29092 --describe --group cep-service-auditoria-v1
+```
+
+A consulta de duplicados deve retornar zero linhas. Partições Kafka vazias podem mostrar offset/lag `-`; nas utilizadas, lag zero significa que o grupo alcançou o final naquele instante. Adapte grupo/tópicos se sobrescrever os padrões. [Contrato e operação da DLT](docs/auditoria-kafka.md).
+
+## Observabilidade
+
+| Interface | URL local |
+| --- | --- |
+| Saúde | http://localhost:8080/actuator/health |
+| Métricas | http://localhost:8080/actuator/prometheus |
+| Prometheus / targets | http://localhost:9090/targets |
+| Grafana | http://localhost:3000 |
+| Dashboard | http://localhost:3000/d/cep-service-observabilidade |
+
+Autentique no Grafana com as credenciais do `.env`. Datasource e dashboard **CEP Service — Observabilidade** são provisionados por arquivos; não é necessário configurá-los na UI. Prometheus coleta a aplicação pela rede interna a cada 15s.
+
+Os sete painéis exibem volume HTTP, requisições/s, p95, erros 5xx, disponibilidade de scrape, memória JVM e CPU do processo. `up=1` significa scrape bem-sucedido, não saúde funcional de todas as dependências. p95 depende de tráfego e é aproximado pelo histograma; `increase` é extrapolado. Não existem contadores específicos de negócio/auditoria nem exporters PostgreSQL/Kafka. Actuator publica somente `health` e `prometheus`, sem detalhes internos de saúde.
+
+Gere tráfego em um CEP local e aguarde dois ou mais scrapes. Detalhes, consultas PromQL e diagnóstico em [monitoramento](docs/monitoramento.md).
+
+## Testes e execução pelo IntelliJ
+
+A referência validada é de **207 testes aprovados**, zero falhas, erros ou ignorados. A etapa documental usa esse resultado anterior e os relatórios Surefire locais; não representa nova execução da suíte.
+
+Para reproduzir, tenha Java 21 no host, inicie dependências e exporte um `.env` local confiável para o processo Maven:
 
 ```sh
 docker compose up -d --wait postgres kafka
-docker compose ps
-```
-
-O Compose le `.env` automaticamente. Maven e Spring Boot nao carregam esse
-arquivo automaticamente. Para executar pelo terminal, exporte as variaveis na
-mesma sessao (o arquivo local deve conter apenas atribuicoes shell confiaveis):
-
-```sh
 set -a
 . ./.env
 set +a
 ./mvnw clean test
+```
+
+Testes unitários usam mocks. Os testes de integração usam os serviços Docker reais, schemas PostgreSQL e tópicos/grupos Kafka isolados; não usam Testcontainers nem o ViaCEP público. Os schemas/tópicos permanecem no ambiente: use infraestrutura dedicada para execuções recorrentes. A suíte cobre contratos, validação, parâmetros SQL, concorrência, fronteiras transacionais, producer assíncrono, retries, DLT e offsets.
+
+Para executar no host, pare somente o app Docker e use a mesma sessão com variáveis exportadas:
+
+```sh
+docker compose stop app
 ./mvnw spring-boot:run
 ```
 
-### Execucao pelo IntelliJ
+No IntelliJ, configure JDK 21, a classe `com.desafio.cep_service.CepServiceApplication` e `Environment variables` com PostgreSQL em `localhost`, porta publicada, banco, usuário, senha e `KAFKA_BOOTSTRAP_SERVERS=localhost:9092`. A IDE não herda automaticamente o `.env` do Compose. Configure também o processo de testes/Maven e não versione Run Configurations com credenciais. O Prometheus do Compose aponta para o serviço `app`; monitorar a JVM no host exige configuração específica, não incluída.
 
-O `.env` usado pelo Compose nao e automaticamente repassado ao Java pelo IntelliJ.
-Para executar diretamente pela IDE:
+O Dockerfile usa Wrapper/JDK 21 no build, cache de dependências e JRE 21 no runtime, com UID/GID 10001. O build executa `package -DskipTests`, compilando testes sem executá-los porque a integração depende dos serviços externos ao build. A suíte completa permanece executável separadamente; o POM não desabilita testes.
 
-1. Abra `Run > Edit Configurations` e selecione ou crie a configuracao da classe
-   `com.desafio.cep_service.CepServiceApplication`, com JDK 21 e classpath do projeto.
-2. Em `Environment variables` (habilite a opcao em `Modify options` se necessario),
-   configure `POSTGRES_HOST=localhost`, `POSTGRES_PORT` com a porta publicada pelo
-   Compose, `POSTGRES_DB`, `POSTGRES_USER` e `POSTGRES_PASSWORD` com os valores do
-   `.env` local. Nao use o texto literal `${POSTGRES_PASSWORD}` como senha.
-3. Mantenha essa configuracao local: nao compartilhe nem versione uma Run
-   Configuration contendo credenciais. Configure tambem as variaveis na execucao
-   dos testes/Maven pela IDE; elas nao sao herdadas de outra Run Configuration.
-4. Configure tambem `KAFKA_BOOTSTRAP_SERVERS=localhost:9092` (ou a porta publicada
-   escolhida), pare o app Docker com `docker compose stop app` e confirme que
-   PostgreSQL e Kafka estao `healthy` em `docker compose ps`. Execute
-   a aplicacao. Verifique a conexao Hikari/JPA nos logs e consulte
-   `http://localhost:8080/actuator/health`, que deve retornar `status: UP`.
+## Operação, decisões e evoluções
 
-Nao ha senha padrao na aplicacao: `POSTGRES_PASSWORD` precisa estar definida no
-processo Java. O healthcheck `pg_isready` verifica disponibilidade do servidor,
-mas nao substitui a validacao de autenticacao feita pela conexao JDBC real.
+```sh
+docker compose logs --tail=100 app
+# Parada sem excluir containers ou volumes.
+docker compose stop
+# Retomada e espera dos healthchecks.
+docker compose up -d --wait --wait-timeout 240
+```
 
-| Variavel | Padrao | Finalidade |
-| --- | --- | --- |
-| `POSTGRES_HOST` | `localhost` | Host acessado pela aplicacao no Mac |
-| `POSTGRES_PORT` | `5432` | Porta local do banco |
-| `POSTGRES_DB` | `cep_service` | Nome do banco |
-| `POSTGRES_USER` | `cep_service` | Usuario local do banco |
-| `POSTGRES_PASSWORD` | Sem padrao | Senha obrigatoria |
+Preserve o nome do projeto Compose e os volumes `postgres_data`, `kafka_data`, `prometheus_data` e `grafana_data`. Não use `docker compose down -v`. O app tem limite de 768 MiB/1 CPU; Prometheus e Grafana, 512 MiB/0,5 CPU cada. App e monitoramento usam `restart: unless-stopped`; PostgreSQL e Kafka mantêm a política padrão do Compose. A parada do app permite até 60s. Volumes persistentes não substituem backups.
 
-A porta e publicada somente em `127.0.0.1`. Se 5432 estiver ocupada, altere
-`POSTGRES_PORT` antes de iniciar e exporte novamente as variaveis.
+Decisões principais: transações curtas sem HTTP externo, banco como autoridade de unicidade, SQL parametrizado, auditoria desacoplada com perda possível antes do broker e consumer idempotente. A análise completa está em [decisões arquiteturais](docs/decisoes-arquiteturais.md).
 
-### Aplicacao dentro do Docker
+Evoluções **não implementadas**: outbox durável se auditoria sem perdas for requisito, autenticação/autorização, TLS/SASL, política explícita de atualização manual, alertas/SLOs, métricas de auditoria, backups e replicação. Não há Kubernetes, CI/CD ou implantação em nuvem. O ambiente local usa broker único e portas restritas a `127.0.0.1`.
 
-O servico `app` ja declara `POSTGRES_HOST=postgres`, `POSTGRES_PORT=5432` e
-`KAFKA_BOOTSTRAP_SERVERS=kafka:29092`, alem de receber banco/usuario/senha do
-mesmo ambiente do PostgreSQL. Ele aguarda as duas dependencias saudaveis.
-`localhost` dentro de um container aponta para o proprio container, por isso
-as conexoes internas utilizam os nomes dos servicos. Consulte o inicio deste
-README para subir o sistema completo com `docker compose up -d --build`.
-
-Os dados ficam no volume nomeado `postgres_data`, gerenciado pelo Compose.
-Para parar sem remover dados, use `docker compose stop postgres`.
-Nao remova o volume nem execute `docker compose down -v`.
-Mantenha o mesmo nome de projeto Compose para reutilizar o volume.
-
-As variaveis `POSTGRES_DB`, `POSTGRES_USER` e `POSTGRES_PASSWORD` inicializam o
-banco apenas quando o volume esta vazio. Altera-las no `.env` nao altera usuarios,
-senhas ou bancos de um volume ja inicializado; essas mudancas exigem administracao
-explicita do PostgreSQL, preservando os dados.
-
-O Hibernate utiliza `ddl-auto=validate` e `open-in-view=false`. O Flyway aplica
-migracoes antes da validacao JPA; `spring.flyway.clean-disabled=true` impede
-limpeza via Flyway. Nao utilize `ddl-auto=update`, `create` ou `create-drop`.
-
-### Evolucao do esquema
-
-O starter Flyway do Spring Boot e o modulo PostgreSQL utilizam as versoes
-gerenciadas pelo BOM do Spring Boot 4.1.1 (Flyway 12.4.0).
-`src/main/resources/db/migration/V1__create_enderecos.sql` cria:
-
-| Campo | Tipo / restricoes |
-| --- | --- |
-| `id` | BIGINT identity, chave primaria |
-| `cep` | VARCHAR(8), NOT NULL, UNIQUE, CHECK de oito digitos |
-| `logradouro`, `complemento`, `bairro` | TEXT, opcionais |
-| `localidade` | VARCHAR(255), NOT NULL, nao vazia |
-| `uf` | VARCHAR(2), NOT NULL, CHECK de duas letras maiusculas |
-| `created_at`, `updated_at` | TIMESTAMP WITH TIME ZONE, NOT NULL |
-
-A constraint `uk_enderecos_cep` fornece o indice de consulta por CEP; nenhum
-indice adicional redundante e criado. O banco armazena oito digitos sem hifen;
-o adaptador devolve o formato `00000-000`, preservando os sete campos da API.
-Os timestamps sao preenchidos pela persistencia; `updated_at` e atualizado em
-alteracoes gerenciadas pelo Hibernate. Nao ha atualizacao de enderecos nesta etapa.
-Nao foi criado campo `estado`, pois ele nao pertence ao modelo atual.
-
-O Flyway registra a V1 em `flyway_schema_history`. Depois de aplicada, nao edite
-a V1: evolua com novas migracoes versionadas. Nao ha baseline automatico,
-recriacao de tabelas ou remocao de dados. Um esquema preexistente incompatível
-exige reconciliacao explicita, sem ativar baseline para ocultar divergencias.
-
-### Fluxo DB-first, falhas e concorrencia
-
-1. Validar o CEP antes de qualquer I/O.
-2. Consultar PostgreSQL por CEP usando consulta derivada parametrizada.
-3. Retornar o endereco local sem chamada externa quando presente.
-4. Somente na ausencia confirmada, consultar ViaCEP.
-5. Gravar o endereco valido e responder somente depois do commit.
-
-Falha de banco nunca vira `Optional.empty()` e nunca autoriza fallback externo.
-Falha de gravacao tambem nao retorna um endereco que nao foi persistido. O
-adaptador traduz falhas para `FalhaPersistenciaEnderecoException`, distinguindo
-LEITURA/GRAVACAO e indisponibilidade/erro/conflito nao recuperado. O advice
-registra operacao, motivo e classe da causa, sem expor SQL ou detalhes internos
-nas respostas. As politicas ViaCEP 400/404/502/503/504 permanecem preservadas.
-
-O caso de uso nao e transacional. O adaptador utiliza `TransactionTemplate` com
-`REQUIRES_NEW` para cada leitura (read-only) e gravacao (`saveAndFlush`). Nenhuma
-transacao permanece aberta durante o HTTP externo.
-
-Duas consultas concorrentes podem chamar ViaCEP. A constraint UNIQUE arbitra a
-gravacao. Somente SQLSTATE 23505 associado a `uk_enderecos_cep` e traduzido para
-`EnderecoJaCadastradoException`, depois que o rollback ja terminou. O caso de uso
-reconsulta em nova transacao e retorna o registro vencedor. Outras violacoes de
-integridade nao sao tratadas como concorrencia. Se a recuperacao nao encontrar o
-registro, retorna erro controlado; se a releitura falhar, propaga a falha do banco.
-Nao ha lock global nem sincronizacao em memoria na aplicacao.
-
-### Testes de persistencia
-
-Execute `./mvnw clean test` com as variaveis PostgreSQL exportadas, conforme acima.
-Os testes de integracao usam o PostgreSQL Docker existente e criam um schema
-isolado `cep_it_<uuid>` por execucao, sem apagar dados, tabelas ou volumes.
-Esses schemas de teste permanecem no banco, respeitando a politica de nao remocao;
-use um banco dedicado a testes em execucoes recorrentes. A credencial local
-precisa permitir a criacao desse schema. Os testes unitarios usam mocks.
-
-A cobertura inclui migracao reproduzivel, esquema validado, round-trip JPA,
-consulta parametrizada, ausencia de transacao durante ViaCEP e concorrencia real
-com rollback e recuperacao. Nenhum teste automatizado depende do ViaCEP publico.
-
-Na validacao manual desta etapa, `01001000` foi persistido e retornado novamente
-com resposta identica mesmo com o cliente externo apontado temporariamente para
-uma porta inacessivel. O registro foi preservado. A URL configurada no arquivo
-continua sendo a URL publica original.
-
-A auditoria Kafka e a migracao V2 estao implementadas; a suite completa exige
-PostgreSQL e Kafka locais saudaveis. Enderecos locais nao possuem politica de
-expiracao/atualizacao automatica nesta etapa.
+A [auditoria da etapa 04](docs/auditoria-etapa-04.md) é um registro histórico com 153 testes naquele momento. A [validação do monitoramento](docs/monitoramento.md) registra a suíte posterior de 207 testes e a confirmação de Kafka → PostgreSQL.

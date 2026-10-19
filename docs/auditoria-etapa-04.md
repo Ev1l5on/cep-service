@@ -1,5 +1,10 @@
 # Auditoria tecnica da etapa 04
 
+[README](../README.md) · [Arquitetura atual](arquitetura.md)
+
+Registro historico: os totais de 116/153 testes e o escopo sem Kafka descrevem
+a etapa 04. A referencia posterior e de 207 testes; consulte o README para o estado atual.
+
 A auditoria considerou o AGENTS.md e os 15 requisitos informados nesta conversa.
 Nao foi encontrada uma copia independente do enunciado original no repositorio.
 As alteracoes existentes no workspace foram preservadas.
