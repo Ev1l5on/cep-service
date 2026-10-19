@@ -1,0 +1,14 @@
+apiVersion: 1
+
+providers:
+  - name: cep-service
+    orgId: 1
+    folder: CEP Service
+    folderUid: cep-service
+    type: file
+    disableDeletion: true
+    editable: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: false
+    options:
+      path: /etc/grafana/dashboards

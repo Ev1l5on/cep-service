@@ -8,13 +8,14 @@ operacao: [docs/auditoria-kafka.md](docs/auditoria-kafka.md).
 ## Iniciar o sistema completo com Docker
 
 Pre-requisitos: Docker Engine/Desktop em execucao, Docker Compose v2 ou superior,
-portas locais 8080, 5432 e 9092 livres e acesso a internet para baixar imagens,
+portas locais 8080, 5432, 9092, 9090 e 3000 livres e acesso a internet para baixar imagens,
 dependencias Maven e consultar ViaCEP. Nao e necessario instalar Java ou Maven
 no host para executar o sistema completo. As imagens Temurin Java 21, PostgreSQL
 17 e Kafka 4.1.1 suportam ARM64 (Apple Silicon) e AMD64; nao se forca emulacao.
 
 1. Se ainda nao existir, copie `.env.example` para `.env`.
-2. Preencha `POSTGRES_PASSWORD` somente no `.env`, com uma senha gerada localmente
+2. Preencha `POSTGRES_PASSWORD` e `GRAFANA_ADMIN_PASSWORD` somente no `.env`,
+   com senhas diferentes geradas localmente
    (por exemplo, `openssl rand -hex 24`). Nunca versione esse arquivo. Em um volume
    existente, preserve as credenciais ja utilizadas; editar `.env` nao troca a senha
    armazenada pelo PostgreSQL.
@@ -32,7 +33,8 @@ docker compose ps
 curl --fail http://localhost:8080/actuator/health
 ```
 
-O esperado e `app`, `postgres` e `kafka` saudaveis e `status: UP` no Actuator.
+O esperado e `app`, `postgres`, `kafka`, `prometheus` e `grafana` saudaveis,
+e `status: UP` no Actuator.
 O app aguarda os healthchecks das dependencias. Flyway aplica/valida V1 e V2 e
 o KafkaAdmin cria automaticamente os topicos de consulta e DLT; nao e necessario
 criar tabelas ou topicos manualmente. O healthcheck do app verifica o Actuator e
@@ -154,6 +156,35 @@ git diff --check
 Os 207 testes existentes incluem PostgreSQL/Kafka reais em schemas/topicos
 isolados e nao dependem do ViaCEP publico. Os schemas/topicos de teste permanecem
 no ambiente; use infraestrutura dedicada em execucoes recorrentes.
+
+## Monitoramento — etapa 09
+
+O Compose tambem inicia Prometheus e Grafana, com datasource e dashboard
+provisionados automaticamente, sem configuracao manual pela interface.
+
+- API / saude: <http://localhost:8080/actuator/health>.
+- Metricas Micrometer: <http://localhost:8080/actuator/prometheus>.
+- Prometheus / targets: <http://localhost:9090/targets>.
+- Grafana: <http://localhost:3000>.
+- Dashboard **CEP Service — Observabilidade**:
+  <http://localhost:3000/d/cep-service-observabilidade>.
+
+Preencha `GRAFANA_ADMIN_USER` e `GRAFANA_ADMIN_PASSWORD` no `.env` antes de subir
+o ambiente; nunca versione senhas. Para um `.env` antigo, acrescente essas duas
+variaveis conforme `.env.example`, preservando as credenciais PostgreSQL existentes.
+O usuario padrao e `admin`; nao existe senha padrao no Compose. As credenciais
+inicializam o volume Grafana somente na primeira execucao: alterar `.env` depois
+nao redefine a senha armazenada.
+
+O Prometheus coleta `app:8080/actuator/prometheus` a cada 15s pela rede interna.
+Os sete paineis mostram volume HTTP, requisicoes/s, p95, erros 5xx,
+disponibilidade de scrape, memoria JVM e CPU do processo. Healthchecks e scrapes
+sao excluidos dos paineis de trafego HTTP. Aguarde pelo menos dois scrapes e gere
+requisicoes para visualizar taxas e percentis.
+
+Configuracao, PromQL, geracao de trafego, validacao e limites conhecidos em
+[docs/monitoramento.md](docs/monitoramento.md). Os novos servicos usam volumes
+`prometheus_data` e `grafana_data`; `docker compose stop` preserva todos os volumes.
 
 ## Organizacao da consulta de CEP
 
